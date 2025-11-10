@@ -1,0 +1,166 @@
+
+
+import random
+from deap import base, creator, tools, algorithms
+import numpy as np
+
+# Concrete grades and properties
+grades = ["M20", "M25", "M30", "M35", "M40"]
+replacement_levels = [0, 5, 7, 10, 12]
+
+# Costs, emissions, and strengths for each grade and replacement level
+costs = {
+    "M20": [3500, 3470, 3395, 3305, 3265],
+    "M25": [4000, 3965, 3935, 3900, 3860],
+    "M30": [5500, 5465, 5425, 5390, 5350],
+    "M35": [6800, 6765, 6735, 6695, 6655],
+    "M40": [7500, 7465, 7430, 7390, 7355],
+}
+emissions = {
+    "M20": [270, 260, 245, 210, 190],
+    "M25": [315, 300, 286, 275, 216],
+    "M30": [360, 352.5, 320, 305.5, 280],
+    "M35": [405, 391, 363, 316, 294],
+    "M40": [450, 436, 420, 402, 381],
+}
+strengths = {
+    "M20": [20, 19.8, 19.4, 18.0, 17.5],
+    "M25": [25, 24.7, 24.6, 23.5, 22.0],
+    "M30": [30, 29.86, 29.4, 28.6, 27.2],
+    "M35": [35, 34.79, 34.31, 34.0, 33.8],
+    "M40": [40, 39.8, 39.6, 39.4, 39.2],
+}
+
+# Define components and their requirements
+components = ["Foundation", "Columns", "Beams", "Slabs", "Walls"]
+volumes = [70, 10, 15, 160, 70]  # Volume requirement in m³
+required_strengths = [34, 28, 23, 18, 22]  # Required strength in MPa
+
+# Define genetic algorithm parameters
+POP_SIZE = 100
+NGEN = 50
+CXPB = 0.7
+MUTPB = 0.2
+
+# Evaluation function with dynamic mix selection and penalty for excess mixes
+def evaluate(individual):
+    total_cost = 0
+    total_emission = 0
+    penalty = 0
+    extra_mix_penalty = 100  # Small penalty for each additional mix to minimize unnecessary mixes
+    cost_weight = 0.3  # Reduce the weight for cost minimization to prioritize emissions and strength
+    
+    for i, component in enumerate(components):
+        volume_needed = volumes[i]
+        strength_needed = required_strengths[i]
+
+        # Retrieve selected mixes for component
+        component_mixes = individual[i]
+
+        component_volume = 0
+        weighted_strength_sum = 0
+
+        # Calculate cost, emissions, volume, and strength for each selected mix
+        for grade_idx, repl_idx, volume in component_mixes:
+            grade = grades[grade_idx]
+            replacement = replacement_levels[repl_idx]
+            cost = costs[grade][repl_idx]
+            emission = emissions[grade][repl_idx]
+            strength = strengths[grade][repl_idx]
+
+            total_cost += cost * volume
+            total_emission += emission * volume
+            component_volume += volume
+            weighted_strength_sum += strength * volume
+
+        # Calculate weighted average strength for this component
+        weighted_strength = weighted_strength_sum / component_volume if component_volume > 0 else 0
+
+        # Apply volume and strength penalties
+        volume_diff = abs(component_volume - volume_needed)
+        if volume_diff > 0.01:
+            penalty += volume_diff * 5000  # Reduce penalty for volume deviation to lower cost impact
+
+        if weighted_strength < strength_needed:
+            penalty += (strength_needed - weighted_strength) * 1000  # Penalty for insufficient strength
+
+        # Add penalty for extra mixes (if unnecessary)
+        if len(component_mixes) > 2:  # Apply penalty only when more than 2 mixes are used
+            penalty += (len(component_mixes) - 2) * extra_mix_penalty
+
+    # Adjust total cost with a lower weight to reduce cost influence
+    total_cost_weighted = total_cost * cost_weight
+    
+    # Return fitness values
+    return total_cost_weighted + penalty, total_emission + penalty
+
+# Function to normalize volumes to match required volume exactly
+def normalize_volumes(individual):
+    normalized_solution = []
+    for i, component in enumerate(components):
+        required_volume = volumes[i]
+
+        component_mixes = individual[i]
+        total_allocated_volume = sum(volume for _, _, volume in component_mixes)
+
+        # Calculate scaling factor
+        scale_factor = required_volume / total_allocated_volume if total_allocated_volume > 0 else 1
+
+        # Scale each mix's volume proportionally
+        normalized_component = [
+            (grade_idx, repl_idx, volume * scale_factor)
+            for grade_idx, repl_idx, volume in component_mixes
+        ]
+        normalized_solution.append(normalized_component)
+
+    return normalized_solution
+
+# DEAP setup
+creator.create("FitnessMin", base.Fitness, weights=(-1.0, -1.0))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+# Individual structure with exactly 2 mixes per component
+def init_component_mixes():
+    num_mixes = 2  # Fix the number of mixes to exactly 2 per component
+    # Limit the initial random choices to lower-cost grades to start with cheaper options
+    return [(random.randint(0, 3),  # Restricting to cheaper grades (M20 to M35)
+             random.randint(0, 3),  # Restricting to lower replacement levels
+             random.uniform(0, 1)) for _ in range(num_mixes)]
+
+toolbox = base.Toolbox()
+toolbox.register("component", init_component_mixes)
+toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.component, n=len(components))
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+toolbox.register("evaluate", evaluate)
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", tools.mutShuffleIndexes, indpb=0.05)
+toolbox.register("select", tools.selNSGA2)
+
+# Run the genetic algorithm
+def main():
+    pop = toolbox.population(n=POP_SIZE)
+    hof = tools.HallOfFame(1, similar=np.array_equal)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean, axis=0)
+    stats.register("std", np.std, axis=0)
+    stats.register("min", np.min, axis=0)
+    stats.register("max", np.max, axis=0)
+
+    algorithms.eaMuPlusLambda(pop, toolbox, mu=POP_SIZE, lambda_=POP_SIZE, cxpb=CXPB, mutpb=MUTPB,
+                              ngen=NGEN, stats=stats, halloffame=hof, verbose=True)
+
+    # Retrieve and normalize the best solution
+    best_solution = hof[0]
+    normalized_solution = normalize_volumes(best_solution)
+
+    # Display the normalized solution
+    print("Normalized Solution:")
+    for i, component in enumerate(components):
+        print(f"{component}:")
+        for j, (grade_idx, repl_idx, volume) in enumerate(normalized_solution[i]):
+            print(f"  Mix {j+1}: Grade {grades[grade_idx]}, Replacement {replacement_levels[repl_idx]}%, Volume: {volume:.2f} m³")
+    print("Fitness (Total Cost, Total Emissions):", best_solution.fitness.values)
+
+if __name__ == "__main__":
+    main()
